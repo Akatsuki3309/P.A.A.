@@ -5,7 +5,7 @@ import requests
 app = FastAPI()
 
 # กำหนดตัวแปรสำคัญ (นำ Token จาก LINE Developers มาใส่ภายหลังได้ครับ)
-LINE_ACCESS_TOKEN = "ใส่_Channel_Access_Token_ของคุณที่นี่"
+LINE_ACCESS_TOKEN = "T4ECVAmXUhAgljTjOWYP5Ox2+XTEybkNYDvxvvSbBlxS8JFBjxZvfqvS5ZZ46ZuRCrwD1jO8hX60rGq0K/UKw4q9UEXZ+AKGVho3To22LPEkcyXGMCZwS9ju83Cx2Kb2de6xQu+/1C/wLfunVywXkwdB04t89/1O/w1cDnyilFU="
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
 # หน้าแรกสำหรับทดสอบว่าเซิร์ฟเวอร์ทำงานอยู่หรือไม่
