@@ -1,54 +1,53 @@
-from fastapi import FastAPI, Request
+import os
 import requests
+from fastapi import FastAPI, Request
+from google import genai
+from dotenv import load_dotenv  # 1. ดึงเครื่องมืออ่านไฟล์ .env มาใช้งาน
 
-# สร้างตัวแอปพลิเคชัน FastAPI
+# 2. สั่งให้ระบบโหลดข้อมูลจากไฟล์ .env เข้ามาในหน่วยความจำ
+load_dotenv()
+
 app = FastAPI()
 
-# กำหนดตัวแปรสำคัญ (นำ Token จาก LINE Developers มาใส่ภายหลังได้ครับ)
-LINE_ACCESS_TOKEN = "T4ECVAmXUhAgljTjOWYP5Ox2+XTEybkNYDvxvvSbBlxS8JFBjxZvfqvS5ZZ46ZuRCrwD1jO8hX60rGq0K/UKw4q9UEXZ+AKGVho3To22LPEkcyXGMCZwS9ju83Cx2Kb2de6xQu+/1C/wLfunVywXkwdB04t89/1O/w1cDnyilFU="
-LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+# 3. ดึงค่าจากไฟล์ .env มาเก็บไว้ในตัวแปร (ถ้าไปรันบน Render ระบบจะดึงจากหน้าเว็บ Render อัตโนมัติ)
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 
-# หน้าแรกสำหรับทดสอบว่าเซิร์ฟเวอร์ทำงานอยู่หรือไม่
-@app.get("/")
-def read_root():
-    return {"message": "Python Backend is running!"}
+# 4. เรียกใช้งาน AI Client 
+# ตัว google-genai จะฉลาดพอที่จะวิ่งไปหาตัวแปรชื่อ GEMINI_API_KEY ในระบบให้เองโดยอัตโนมัติครับ
+ai_client = genai.Client()
 
-# เส้นทางหลักที่รอรับข้อมูล (Webhook)
 @app.post("/webhook")
-async def receive_webhook(request: Request):
-    # 1. รับข้อมูล JSON ที่ส่งมา
-    data = await request.json()
+async def webhook(request: Request):
+    payload = await request.json()
+    events = payload.get("events", [])
     
-    # ตรวจสอบว่ามีเหตุการณ์ (Event) ส่งมาหรือไม่
-    if "events" in data and len(data["events"]) > 0:
-        event = data["events"][0]
+    if not events:
+        return {"status": "ok"}
         
-        # ตรวจสอบว่าเป็นข้อความตัวอักษรหรือไม่
-        if event.get("type") == "message" and event["message"].get("type") == "text":
-            user_message = event["message"]["text"]
-            reply_token = event["replyToken"]
-            
-            # 2. พื้นที่สำหรับประมวลผล (เช่น ดึงข้อมูล API ภายนอก)
-            # ตอนนี้เราทำเป็นข้อความตอบกลับง่ายๆ เพื่อทดสอบก่อนครับ
-            reply_text = f"Python Backend ได้รับข้อความ: {user_message}"
-            
-            # 3. เรียกใช้ฟังก์ชันเพื่อส่งข้อความกลับไปหาผู้ใช้
-            send_reply(reply_token, reply_text)
-            
-    # ส่งสถานะกลับไปว่ารับข้อมูลเรียบร้อย
-    return {"status": "ok"}
-
-# ฟังก์ชันสำหรับยิง API ตอบกลับไปยัง LINE
-def send_reply(reply_token, text):
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    payload = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text}]
-    }
+    event = events[0]
+    reply_token = event.get("replyToken")
+    user_message = event.get("message", {}).get("text", "")
     
-    # ส่ง Request ไปที่เซิร์ฟเวอร์ของ LINE
-    response = requests.post(LINE_REPLY_URL, headers=headers, json=payload)
-    print(f"สถานะการส่งข้อความ: {response.status_code}")
+    if reply_token and user_message:
+        # 🧠 ส่งข้อความไปถาม Gemma 4 26B
+        try:
+            response = ai_client.models.generate_content(
+                model="gemma-4-26b-a4b-it",
+                contents=user_message
+            )
+            bot_reply = response.text
+        except Exception as e:
+            bot_reply = f"(บอทงงนิดหน่อย ขออภัยด้วยนะครับ) เกิดข้อผิดพลาด: {str(e)}"
+            
+        # 💬 ส่งคำตอบกลับไปหาผู้ใช้ใน LINE
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+        }
+        line_payload = {
+            "replyToken": reply_token,
+            "messages": [{"type": "text", "text": bot_reply}]
+        }
+        requests.post("https://api.line.me/v2/bot/message/reply", json=line_payload, headers=headers)
+        
+    return {"status": "ok"}
