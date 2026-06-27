@@ -1,53 +1,89 @@
 import os
-import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from dotenv import load_dotenv
 from google import genai
-from dotenv import load_dotenv  # 1. ดึงเครื่องมืออ่านไฟล์ .env มาใช้งาน
+from google.genai import types
+from pinecone import Pinecone
 
-# 2. สั่งให้ระบบโหลดข้อมูลจากไฟล์ .env เข้ามาในหน่วยความจำ
+# โหลดค่าจากไฟล์ .env
 load_dotenv()
 
 app = FastAPI()
 
-# 3. ดึงค่าจากไฟล์ .env มาเก็บไว้ในตัวแปร (ถ้าไปรันบน Render ระบบจะดึงจากหน้าเว็บ Render อัตโนมัติ)
+# ตั้งค่า LINE และ API Keys
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET") # หากในระบบเดิมคุณใช้ตัวนี้ อย่าลืมเช็คในเว็บ Render ด้วยนะครับ
+line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 4. เรียกใช้งาน AI Client 
-# ตัว google-genai จะฉลาดพอที่จะวิ่งไปหาตัวแปรชื่อ GEMINI_API_KEY ในระบบให้เองโดยอัตโนมัติครับ
-ai_client = genai.Client()
+# เปิดใช้งาน Client ของ Google และ Pinecone
+ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("paa") # ชื่อ Index ของเรา
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    payload = await request.json()
-    events = payload.get("events", [])
+async def callback(request: Request):
+    signature = request.headers.get("X-Line-Signature")
+    body = await request.body()
+    try:
+        handler.handle(body.decode("utf-8"), signature)
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    return "OK"
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_question = event.message.text
     
-    if not events:
-        return {"status": "ok"}
-        
-    event = events[0]
-    reply_token = event.get("replyToken")
-    user_message = event.get("message", {}).get("text", "")
-    
-    if reply_token and user_message:
-        # 🧠 ส่งข้อความไปถาม Gemma 4 26B
-        try:
-            response = ai_client.models.generate_content(
-                model="gemma-4-26b-a4b-it",
-                contents=user_message
-            )
-            bot_reply = response.text
-        except Exception as e:
-            bot_reply = f"(บอทงงนิดหน่อย ขออภัยด้วยนะครับ) เกิดข้อผิดพลาด: {str(e)}"
-            
-        # 💬 ส่งคำตอบกลับไปหาผู้ใช้ใน LINE
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-        }
-        line_payload = {
-            "replyToken": reply_token,
-            "messages": [{"type": "text", "text": bot_reply}]
-        }
-        requests.post("https://api.line.me/v2/bot/message/reply", json=line_payload, headers=headers)
-        
-    return {"status": "ok"}
+    try:
+        # 1. แปลงคำถามของลูกค้าเป็น Vector
+        response_embed = ai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=user_question,
+            config=types.EmbedContentConfig(output_dimensionality=768)
+        )
+        question_vector = response_embed.embeddings[0].values
+
+        # 2. ค้นหาข้อมูลที่ตรงกันใน Pinecone (ดึงมา 2 อันดับแรกที่เกี่ยวข้องที่สุด)
+        search_results = index.query(
+            vector=question_vector,
+            top_k=2,
+            include_metadata=True
+        )
+
+        # 3. นำข้อความที่ค้นเจอมาต่อกันเป็น Context
+        context_text = ""
+        if 'matches' in search_results:
+            for match in search_results['matches']:
+                context_text += match['metadata']['text'] + "\n\n"
+
+        # 4. สร้าง Prompt รวมข้อมูลเข้ากับคำถาม เพื่อสั่งให้ AI ตอบ
+        prompt = f"""
+คุณคือผู้ช่วย AI ประจำร้าน/องค์กร จงใช้ข้อมูลอ้างอิงด้านล่างนี้ในการตอบคำถามของลูกค้าเท่านั้น
+หากคำถามไหนไม่มีในข้อมูลอ้างอิง ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ฉันไม่มีข้อมูลในส่วนนี้"
+
+ข้อมูลอ้างอิง:
+{context_text}
+
+คำถามจากลูกค้า: {user_question}
+"""
+
+        # 5. ส่งให้ AI สร้างคำตอบ (คุณสามารถเปลี่ยนชื่อโมเดลตรงนี้เป็น gemma-2-27b-it ได้หากต้องการ)
+        ai_response = ai_client.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents=prompt
+        )
+        answer = ai_response.text
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        answer = "ขออภัยค่ะ ระบบประมวลผลขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งนะคะ"
+
+    # 6. ส่งคำตอบกลับไปยัง LINE
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=answer)
+    )
