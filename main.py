@@ -71,16 +71,17 @@ def handle_message(event):
 คำถามจากลูกค้า: {user_question}
 """
 
-        # 5. ส่งให้ AI สร้างคำตอบ (คุณสามารถเปลี่ยนชื่อโมเดลตรงนี้เป็น gemma-2-27b-it ได้หากต้องการ)
+        # 5. ส่งให้ AI สร้างคำตอบ
         ai_response = ai_client.models.generate_content(
             model="gemini-2.5-flash", 
             contents=prompt
         )
-        answer = ai_response.text
+        # บังคับให้เอา Context ที่หาเจอมาโชว์คู่กับคำตอบ AI
+        answer = f"🔍 [ข้อมูลที่ดึงจากคลาวด์]:\n{context_text}\n\n🤖 [AI ตอบว่า]:\n{ai_response.text}"
 
     except Exception as e:
         print(f"Error: {str(e)}")
-        answer = "ขออภัยค่ะ ระบบประมวลผลขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งนะคะ"
+        answer = "ขออภัยค่ะ ระบบประมวลผลขัดข้องชั่วคราว"
 
     # 6. ส่งคำตอบกลับไปยัง LINE
     line_bot_api.reply_message(
